@@ -1,11 +1,13 @@
-import { fork, guard, keys, opt } from "js-tools";
+import { aim, fork, guard, keys, opt } from "js-tools";
 
 type TSide = "left" | "right" | "top" | "bottom";
+type TDirection = "x" | "y";
 const defaultConfig = {
   resize: true,
   move: true,
   inParent: true,
   accelerate: 1,
+  edgeRadius: 20,
   onMove: (x: number, y: number) => {},
   onResize: (side: TSide, dis: number) => {},
   mouse: { x: 0, y: 0 },
@@ -15,33 +17,41 @@ type PConfig = Partial<TConfig>;
 type THandle = typeof moveElement;
 
 const translateRGX = /translate\((-?\d+).*,\s*(-?\d+).+\)/i;
-const edgeRadius = 20;
 
-export function interact(elm: HTMLElement, config: PConfig = defaultConfig) {
-  config = { ...defaultConfig, ...config };
-  let handlers: ((e: MouseEvent) => void)[] = [changeCursor];
+export function interact(elm: HTMLElement, config?: PConfig) {
+  let c: TConfig = { ...defaultConfig, ...config };
+  elm.style.position = "absolute";
+  elm.style.boxSizing = "border-box";
+  !c.resize && (c.edgeRadius = 0);
+  let changeCursorListener = (e: MouseEvent) => changeCursor(e, c as TConfig);
+  let handlers: ((e: MouseEvent) => void)[] = [changeCursorListener];
   elm.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    config.mouse = { x: e.clientX, y: e.clientY };
+    c.mouse = { x: e.clientX, y: e.clientY };
     elm.setPointerCapture(e.pointerId);
     handlers = [];
     fork(
-      guard((e: MouseEvent) => {
-        handlers.push((e) => moveElement(e, config as TConfig));
+      guard((e: MouseEvent, c: TConfig) => {
+        handlers.push((e) => moveElement(e, c));
       }, isInside),
-      guard((e: MouseEvent) => {
-        handlers.push((e) => resizeLeft(e, config as TConfig));
-      }, isOnLeft),
-      guard((e: MouseEvent) => {
-        handlers.push((e) => resizeRight(e, config as TConfig));
-      }, isOnRight),
-      guard((e: MouseEvent) => {
-        handlers.push((e) => resizeTop(e, config as TConfig));
-      }, isOnTop),
-      guard((e: MouseEvent) => {
-        handlers.push((e) => resizeBottom(e, config as TConfig));
-      }, isOnBottom)
-    )(e);
+      guard(
+        fork(
+          guard((e: MouseEvent, c) => {
+            handlers.push((e) => resize(e, c, "left"));
+          }, isOnLeft),
+          guard((e: MouseEvent, c) => {
+            handlers.push((e) => resize(e, c, "right"));
+          }, isOnRight),
+          guard((e: MouseEvent, c) => {
+            handlers.push((e) => resize(e, c, "top"));
+          }, isOnTop),
+          guard((e: MouseEvent, c) => {
+            handlers.push((e) => resize(e, c, "bottom"));
+          }, isOnBottom)
+        ),
+        () => (c as TConfig).resize
+      )
+    )(e, c as TConfig);
   });
   elm.addEventListener("pointermove", (e) => {
     e.preventDefault();
@@ -50,7 +60,7 @@ export function interact(elm: HTMLElement, config: PConfig = defaultConfig) {
   elm.addEventListener("pointerup", (e) => {
     e.preventDefault();
     elm.releasePointerCapture(e.pointerId);
-    handlers = [changeCursor];
+    handlers = [changeCursorListener];
   });
 }
 function moveElement(e: MouseEvent, config: typeof defaultConfig) {
@@ -61,38 +71,32 @@ function moveElement(e: MouseEvent, config: typeof defaultConfig) {
   let [x, y] = translateElm(disX, disY, elm);
   config.onMove?.(x, y);
 }
-function resizeLeft(e: MouseEvent, c: TConfig) {
-  let dis = calcDis(e, c, "x", "left");
+function resize(e: MouseEvent, c: TConfig, side: TSide) {
+  let direction: TDirection = side === "right" || side === "left" ? "x" : "y";
+  let dis = calcDis(e, c, direction, side);
   let elm = e.target as HTMLElement;
-  let width = elm.offsetWidth;
-  elm.style.width = width - dis + "px";
-  translateElm(dis, 0, elm);
-  c.onResize?.("left", dis);
+  resizeElmSide(side, dis, elm);
+  c.onResize?.(side, dis);
 }
-function resizeRight(e: MouseEvent, c: TConfig) {
-  let dis = calcDis(e, c, "x", "right");
-  let elm = e.target as HTMLElement;
-  let width = elm.offsetWidth;
-  elm.style.width = width + dis + "px";
-  c.onResize?.("right", dis);
+export function resizeElmSide(side: TSide, dis: number, elm: HTMLElement) {
+  let direction: TDirection = side === "right" || side === "left" ? "x" : "y";
+  if (direction === "x") {
+    let width = elm.offsetWidth;
+    if (side === "right") elm.style.width = width + dis + "px";
+    else {
+      elm.style.width = width - dis + "px";
+      translateElm(dis, 0, elm);
+    }
+  } else {
+    let height = elm.offsetHeight;
+    if (side === "bottom") elm.style.height = height + dis + "px";
+    else {
+      elm.style.height = height - dis + "px";
+      translateElm(0, dis, elm);
+    }
+  }
 }
-function resizeTop(e: MouseEvent, c: TConfig) {
-  let dis = calcDis(e, c, "y", "top");
-  let elm = e.target as HTMLElement;
-  let height = elm.offsetHeight;
-  elm.style.height = height - dis + "px";
-  translateElm(0, dis, elm);
-  c.onResize?.("top", dis);
-}
-function resizeBottom(e: MouseEvent, c: TConfig) {
-  let dis = calcDis(e, c, "y", "bottom");
-  let elm = e.target as HTMLElement;
-  let height = elm.offsetHeight;
-  elm.style.height = height + dis + "px";
-  c.onResize?.("bottom", dis);
-}
-
-function isInside(e: MouseEvent) {
+function isInside(e: MouseEvent, { edgeRadius }: TConfig) {
   let rect = (e.target as HTMLElement).getBoundingClientRect() as any;
   return keys(sides).every((d) =>
     (sides[d] as any).every(
@@ -119,28 +123,28 @@ export function translateElm(x: number, y: number, elm: HTMLElement) {
   }
   return coord;
 }
-function isOnLeft(e: MouseEvent) {
+function isOnLeft(e: MouseEvent, { edgeRadius }: TConfig) {
   return (
     Math.abs(
       e.clientX - (e.target as HTMLElement).getBoundingClientRect().left
     ) < edgeRadius
   );
 }
-function isOnRight(e: MouseEvent) {
+function isOnRight(e: MouseEvent, { edgeRadius }: TConfig) {
   return (
     Math.abs(
       e.clientX - (e.target as HTMLElement).getBoundingClientRect().right
     ) < edgeRadius
   );
 }
-function isOnTop(e: MouseEvent) {
+function isOnTop(e: MouseEvent, { edgeRadius }: TConfig) {
   return (
     Math.abs(
       e.clientY - (e.target as HTMLElement).getBoundingClientRect().top
     ) < edgeRadius
   );
 }
-function isOnBottom(e: MouseEvent) {
+function isOnBottom(e: MouseEvent, { edgeRadius }: TConfig) {
   return (
     Math.abs(
       e.clientY - (e.target as HTMLElement).getBoundingClientRect().bottom
@@ -148,30 +152,51 @@ function isOnBottom(e: MouseEvent) {
   );
 }
 
-function changeCursor(e: MouseEvent) {
+function changeCursor(e: MouseEvent, c: TConfig) {
   fork(
-    guard((e: MouseEvent) => setCursorStyle(e, "grab"), isInside),
-    guard((e: MouseEvent) => setCursorStyle(e, "w-resize"), isOnLeft),
-    guard((e: MouseEvent) => setCursorStyle(e, "e-resize"), isOnRight),
-    guard((e: MouseEvent) => setCursorStyle(e, "n-resize"), isOnTop),
-    guard((e: MouseEvent) => setCursorStyle(e, "s-resize"), isOnBottom),
-    guard((e: MouseEvent) => setCursorStyle(e, "nw-resize"), isOnTop, isOnLeft),
+    guard((e: MouseEvent, c: TConfig) => setCursorStyle(e, "grab"), isInside),
     guard(
-      (e: MouseEvent) => setCursorStyle(e, "ne-resize"),
-      isOnTop,
-      isOnRight
-    ),
-    guard(
-      (e: MouseEvent) => setCursorStyle(e, "sw-resize"),
-      isOnBottom,
-      isOnLeft
-    ),
-    guard(
-      (e: MouseEvent) => setCursorStyle(e, "se-resize"),
-      isOnBottom,
-      isOnRight
+      fork(
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "w-resize"),
+          isOnLeft
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "e-resize"),
+          isOnRight
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "n-resize"),
+          isOnTop
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "s-resize"),
+          isOnBottom
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "nw-resize"),
+          isOnTop,
+          isOnLeft
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "ne-resize"),
+          isOnTop,
+          isOnRight
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "sw-resize"),
+          isOnBottom,
+          isOnLeft
+        ),
+        guard(
+          (e: MouseEvent, c: TConfig) => setCursorStyle(e, "se-resize"),
+          isOnBottom,
+          isOnRight
+        )
+      ),
+      () => c.resize
     )
-  )(e);
+  )(e, c);
 }
 function setCursorStyle(e: MouseEvent, cursor: string) {
   (e.target as HTMLElement).style.cursor = cursor;
@@ -184,7 +209,7 @@ const sides = {
 function calcDis(
   e: MouseEvent,
   config: TConfig,
-  direction: "x" | "y",
+  direction: TDirection,
   side?: TSide
 ) {
   let elm = e.target as HTMLElement;
@@ -194,7 +219,7 @@ function calcDis(
   let dis = e[mkey] - config.mouse[direction];
   !side && (side = dis < 0 ? sides[direction][0] : sides[direction][1]);
   dis *= config.accelerate;
-  let length: 'width' | 'height' = direction === 'x'?'width':'height';
+  let length: "width" | "height" = direction === "x" ? "width" : "height";
   if (config.inParent) {
     let rect = elm.getBoundingClientRect();
     let parentRect = elm.parentElement?.getBoundingClientRect() as DOMRect;
@@ -211,7 +236,7 @@ function calcDis(
         },
         _: (side: TSide) => side,
       })(side);
-    }else dis =0;
+    } else dis = 0;
   }
   config.mouse[direction] = e[mkey];
   return dis;
